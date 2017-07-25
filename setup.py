@@ -3,10 +3,10 @@ from setuptools import setup, find_packages
 VERSION = '0.0.1'
 
 setup(
-    name='keras-additions',
+    name='extkeras',
     version=VERSION,
-    description='Playground for Keras "add-ons"',
-    url='https://github.com/andhus/keras-additions',
+    description='Playground for external Keras extras',
+    url='https://github.com/andhus/extkeras',
     license='MIT',
     install_requires=[
         'numpy>=1.13.0',
