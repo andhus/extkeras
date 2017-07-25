@@ -1,12 +1,13 @@
 from __future__ import print_function, division
 
-import numpy as np
-
-from keras import activations, initializers, regularizers
 from keras import backend as K
 from keras.engine import InputSpec
 from keras.engine import Layer
+from keras.layers.merge import concatenate
 from keras.layers.recurrent import LSTM
+
+from extkeras.functional import FunctionalBlock
+from extkeras import initializers
 
 
 class CellMaskedLSTM(LSTM):
@@ -122,19 +123,18 @@ class PhasedLSTMCellMask(Layer):
 
     def __init__(
         self,
-        output_dim,
-        # init='glorot_uniform',  # TODO add
-        input_dim=1,  # TODO hide
+        units,
+        initializer=None,
         alpha=0.001,
         **kwargs
     ):
         # self.init = initializations.get(init)
 
-        self.units = output_dim
-        self.input_dim = input_dim
-        # self.input_spec = [InputSpec(ndim='2+')]
+        self.units = units
+        self.input_dim = 1
         self.timegate = None  # set in build
         self.alpha = alpha
+        self.initializer = initializer or initializers.TimeGate()
         if 'input_shape' not in kwargs and 'input_dim' in kwargs:
             kwargs['input_shape'] = (kwargs.pop('input_dim'),)
         super(PhasedLSTMCellMask, self).__init__(**kwargs)
@@ -145,32 +145,32 @@ class PhasedLSTMCellMask(Layer):
         assert input_dim == 1
         self.input_dim = input_dim
         self.input_spec = InputSpec(min_ndim=2, axes={-1: input_dim})
-        self.timegate = K.variable(
-            np.vstack((np.random.uniform(10, 100, self.units),
-                       np.random.uniform(0, 1000, self.units),
-                       np.zeros(self.units) + 0.05)),
-            name='{}_tgate'.format(self.name))
-
-        self.trainable_weights = [self.timegate]
+        self.timegate = self.add_weight(
+            shape=(3, self.units),
+            initializer=self.initializer,
+            name='timegate',
+            # regularizer=self.regularizer,
+            # constraint=self.constraint
+        )
         self.built = True
 
-    def call(self, x, mask=None):
-        t = x
+    def call(self, inputs, mask=None):
+        t = inputs
         timegate = K.abs(self.timegate)
         period = timegate[0]
         shift = timegate[1]
         r_on = timegate[2]
 
-        # modulo operation not implemented in Tensorflow backend, so write explicitly.
-        # a mod n = a - (n * int(a/n))
-        # phi = ((t - shift) % period) / period
-        phi = ((t - shift) - (period * ((t - shift) // period))) / period
-
-        # K.switch not consistent between Theano and Tensorflow backend, so write explicitly.
+        phi = ((t - shift) % period) / period
+        # K.switch not consistent between Theano and Tensorflow backend,
+        # so write explicitly.
+        # TODO check if still the case
         up = K.cast(K.less(phi, r_on * 0.5), K.floatx()) * 2 * phi / r_on
-        mid = K.cast(K.less(phi, r_on), K.floatx()) * \
-              K.cast(K.greater(phi, r_on * 0.5), K.floatx()) * (
-                  2 - (2 * phi / r_on))
+        mid = (
+            K.cast(K.less(phi, r_on), K.floatx()) *
+            K.cast(K.greater(phi, r_on * 0.5), K.floatx()) *
+            (2 - (2 * phi / r_on))
+        )
         end = K.cast(K.greater(phi, r_on * 0.5), K.floatx()) * self.alpha * phi
         k = up + mid + end
 
@@ -187,3 +187,41 @@ class PhasedLSTMCellMask(Layer):
         config = {'output_dim': self.units, 'alpha': self.alpha}
         base_config = super(PhasedLSTMCellMask, self).get_config()
         return dict(list(base_config.items()) + list(config.items()))
+
+
+class PhasedLSTM(FunctionalBlock):
+
+    def __init__(
+        self,
+        units,
+        regular_units=0,
+        alpha=0.001,
+        cell_mask_initializer=None,
+        **kwargs
+    ):
+        if regular_units != 0:
+            raise NotImplementedError('')
+            # TODO we can "spare" some units and let them operate as usual
+            # by just masking this subset with ones
+
+        name = kwargs.pop('name', self.__class__.__name__)
+        self.cell_mask = PhasedLSTMCellMask(
+            name=name+'_PhasedLSTMCellMask',
+            units=units,
+            initializer=cell_mask_initializer,
+            alpha=alpha
+        )
+        self.cell_masked_lstm = CellMaskedLSTM(
+            name=name+'_CellMaskedLSTM',
+            units=units,
+            **kwargs
+        )
+
+    def __call__(self, inputs):
+        lstm_inputs, time = inputs
+        cell_mask = self.cell_mask(time)
+        outputs = self.cell_masked_lstm(
+            concatenate([lstm_inputs, cell_mask], axis=2)
+        )
+
+        return outputs
