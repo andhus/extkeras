@@ -31,6 +31,18 @@ class ScaledExponential(FunctionalBlock):
         return self.scale * K.exp(x) + self.epsilon
 
 
+class DistributionBase(object):
+    __metaclass__ = abc.ABCMeta
+
+    @abc.abstractmethod
+    def activation(self, x):
+        pass
+
+    @abc.abstractmethod
+    def loss(self, ):
+        pass
+
+
 class MixtureParamsActivationBase(FunctionalBlock):
     __metaclass__ = abc.ABCMeta
 
@@ -53,7 +65,7 @@ class MixtureParamsActivationBase(FunctionalBlock):
             )
         components = dim // cls.n_param_types
         param_types = [
-            x[i*components:(i+1)*components] for i in range(cls.n_param_types)
+            x[..., i*components:(i+1)*components] for i in range(cls.n_param_types)
         ]
 
         return param_types
