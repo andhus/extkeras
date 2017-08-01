@@ -4,9 +4,9 @@ import numpy as np
 
 from keras import Input
 from keras.engine import Model
-from keras.layers import Dense, SimpleRNN, TimeDistributed
+from keras.layers import Dense, SimpleRNN
 
-from extkeras.layers.attention import RecurrentAttentionWrapper
+from extkeras.layers.attention_old import RecurrentAttentionWrapper
 
 n_timesteps = 7
 n_features = 5
@@ -19,7 +19,7 @@ recurrent_layer = SimpleRNN(units=4)
 attention_model = Dense(units=4)
 
 rnn = RecurrentAttentionWrapper(
-    attention_layer=attention_model,
+    attention_model=attention_model,
     recurrent_layer=recurrent_layer
 )
 output_layer = Dense(1, activation='sigmoid')
