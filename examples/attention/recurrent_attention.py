@@ -6,17 +6,21 @@ from keras import Input
 from keras.engine import Model
 from keras.layers import Dense, SimpleRNN, TimeDistributed
 
-from extkeras.layers.attention import RecurrentAttentionWrapper
+from extkeras.layers.attention import (
+    RecurrentAttentionWrapper,
+    DenseStatelessAttention
+)
 
 n_timesteps = 7
 n_features = 5
+n_features_attention = 2
 n_samples = 1000
 
 features = Input((n_timesteps, n_features))
-attended = Input((n_features, ))  # TODO same as number of features for now due to test hack...
+attended = Input((n_features_attention, ))
 
-recurrent_layer = SimpleRNN(units=4)
-attention_model = Dense(units=4)
+recurrent_layer = SimpleRNN(units=4, implementation=1)
+attention_model = DenseStatelessAttention(units=3)
 
 rnn = RecurrentAttentionWrapper(
     attention_layer=attention_model,
@@ -24,7 +28,7 @@ rnn = RecurrentAttentionWrapper(
 )
 output_layer = Dense(1, activation='sigmoid')
 
-last_state = rnn(features, attended=attended)
+last_state = rnn([features, attended])
 output = output_layer(last_state)
 
 model = Model(
@@ -33,7 +37,7 @@ model = Model(
 )
 
 features_data = np.random.randn(n_samples, n_timesteps, n_features)
-attended_data = np.ones((n_samples, n_features), dtype=float)
+attended_data = np.ones((n_samples, n_features_attention), dtype=float)
 attended_data[::2] = 0.
 target_data = attended_data.mean(axis=1, keepdims=True)
 

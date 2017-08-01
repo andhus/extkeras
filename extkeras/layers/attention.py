@@ -2,6 +2,7 @@ from __future__ import division, print_function
 
 
 from keras import backend as K
+from keras.engine import InputSpec
 from keras.layers import Dense, concatenate
 from keras.layers.recurrent import Recurrent
 from keras.layers.recurrent import SimpleRNN as _SimpleRNN
@@ -22,6 +23,8 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
             recurrent_layer
         )
         self._attended = None
+        self.input_spec = [InputSpec(ndim=3), None]
+        # later should be set to attention_layer.input_spec
 
     @property
     def states(self):
@@ -43,10 +46,14 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
     def build(self, input_shape):
         [input_shape, attended_shape] = input_shape
         wrapped_recurrent_step_input_shape = input_shape[:1] + input_shape[-1:]
+
         wrapped_recurrent_state_shapes = [
-            (input_shape[0], self.recurrent_layer.units)
-            for _ in self.recurrent_layer.states
-        ]
+            input_shape[:1] + spec.shape[1:]
+            for spec in self.recurrent_layer.state_spec
+        ] if isinstance(self.recurrent_layer.state_spec, list) else [(
+            input_shape[:1] + self.recurrent_layer.state_spec.shape[1:]
+        )]
+
         self.attention_layer.build(
             attended_shape,
             wrapped_recurrent_step_input_shape,
@@ -59,6 +66,8 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
             )[-1:]
         )
         self.recurrent_layer.build(wrapped_recurrent_input_shape)
+
+        self.input_spec = [InputSpec(ndim=3), InputSpec(shape=attended_shape)]
         self.built = True
 
     def call(
@@ -91,7 +100,7 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
         wrapped_recurrent_input = self.attention_layer.attention_step(
             attended=attended,
             recurrent_input=inputs,
-            recurrent_states=states,
+            recurrent_states=list(states[:-2]),
             attention_states=[]  # TODO fix!
         )
         return self.recurrent_layer.step(wrapped_recurrent_input, states)
@@ -168,7 +177,7 @@ class DenseStatelessAttention(AttentionLayer, ChildrenLayersMixin):
                 (
                     attended_shape[1] +
                     recurrent_step_input_shape[1] +
-                    sum(s[1] for s in recurrent_state_shapes)
+                    sum([s[1] for s in recurrent_state_shapes])
                 )
             )
         )
