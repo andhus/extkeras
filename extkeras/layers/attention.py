@@ -2,7 +2,7 @@ from __future__ import division, print_function
 
 
 from keras.engine import InputSpec
-from keras.layers import Dense, concatenate
+from keras.layers import Dense, concatenate, Layer
 from keras.layers.recurrent import Recurrent
 
 from extkeras.layers.children_layers_mixin import ChildrenLayersMixin
@@ -194,3 +194,19 @@ class DenseStatelessAttention(ChildrenLayersMixin, AttentionLayer):
             concatenate([attended, recurrent_input] + recurrent_states)
         )
         return concatenate([recurrent_input, attention])
+
+
+class SequenceAttention(Layer):
+
+    def __init__(
+        self,
+        n_components
+    ):
+        super(SequenceAttention)
+        self.n_components = n_components
+
+    def build(
+        self,
+        attended_shape,
+        input_shape
+    ):
