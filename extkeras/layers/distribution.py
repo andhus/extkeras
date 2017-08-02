@@ -73,7 +73,10 @@ class MixtureDistributionABC(DistributionABC):
         # Returns
             list of Tensors, one for each param type
         """
-        last_dim = x.shape[-1].value  # TODO only works with tf
+        if isinstance(x, np.ndarray):
+            last_dim = x.shape[-1]
+        else:
+            last_dim = x.shape[-1].value  # TODO only works with tf
         if not last_dim == self.n_params:
             raise ValueError(
                 'last dimension of x must be equal to the number of parameters'
