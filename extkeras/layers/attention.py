@@ -1,11 +1,9 @@
 from __future__ import division, print_function
 
 
-from keras import backend as K
 from keras.engine import InputSpec
 from keras.layers import Dense, concatenate
 from keras.layers.recurrent import Recurrent
-from keras.layers.recurrent import SimpleRNN as _SimpleRNN
 
 from extkeras.layers.children_layers_mixin import ChildrenLayersMixin
 
@@ -31,6 +29,7 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
         return self.recurrent_layer.states + self.attention_layer.states
 
     def compute_output_shape(self, input_shape):
+        [input_shape, attended_shape] = input_shape
         input_step_shape = input_shape[:1] + input_shape[-1:]
         wrapped_recurrent_input_shape = (
             input_shape[:-1] +
@@ -162,7 +161,7 @@ class AttentionLayer(Recurrent):
         )
 
 
-class DenseStatelessAttention(AttentionLayer, ChildrenLayersMixin):
+class DenseStatelessAttention(ChildrenLayersMixin, AttentionLayer):
 
     def build(
         self,
