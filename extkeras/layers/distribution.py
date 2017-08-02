@@ -1,6 +1,7 @@
 from __future__ import division, print_function
 
 import abc
+from collections import OrderedDict
 
 import numpy as np
 
@@ -8,30 +9,12 @@ from keras import backend as K
 from keras.layers import Dense, concatenate
 from keras.activations import softmax
 
-from extkeras.functional import FunctionalBlock
+from extkeras.activations import ScaledExponential
 
 
-class ScaleAndShift(FunctionalBlock):
-
-    def __init__(self, scale=1, shift=0):
-        self.scale = scale
-        self.shift = shift
-
-    def __call__(self, x):
-        return self.scale * x + self.shift
-
-
-class ScaledExponential(FunctionalBlock):
-
-    def __init__(self, scale=1, epsilon=1e-3):
-        self.scale = scale
-        self.epsilon = epsilon
-
-    def __call__(self, x):
-        return self.scale * K.exp(x) + self.epsilon
-
-
-class DistributionBase(object):
+class DistributionABC(object):
+    """Defines activation for distribution parameters and (default) loss for
+    target given the distribution."""
     __metaclass__ = abc.ABCMeta
 
     @abc.abstractmethod
@@ -41,20 +24,22 @@ class DistributionBase(object):
 
     @abc.abstractmethod
     def loss(self, y_true, y_pred):
-        """Implementation of standard loss for this this distribution normally
-        -log(pdf(y_true)) where pdf is parameterized by y_pred
+        """Implementation of standard loss for this this distribution, normally
+        -log(pdf(y_true)) where pdf is parametrized by y_pred
         """
         pass
 
     @abc.abstractproperty
     def n_params(self):
+        """Expected size of x in activation and y_pred in loss"""
         pass
 
+    # TODO require config to be implemented
 
-class MixtureDistributionBase(DistributionBase):
+
+class MixtureDistributionABC(DistributionABC):
+    """Base class for Mixture distributions"""
     __metaclass__ = abc.ABCMeta
-
-    n_param_types = None
 
     def __init__(self, n_components):
         self.n_components = n_components
@@ -63,38 +48,56 @@ class MixtureDistributionBase(DistributionBase):
     def mixture_weight_activation(self):
         return softmax
 
-    @classmethod
-    def split_param_types(cls, x):
-        """Splits input tensor into the different param types.
-        Assumes same number of parameters for each param type...
+    @abc.abstractproperty
+    def param_type_to_size(self):
         """
-        # TODO use n_components instead?
-        dim = x.shape[-1].value
-        if not dim % cls.n_param_types == 0:
+        # Returns
+            An OrderedDict of param_type (str) to size (int)
+
+        # Example
+            return OrderedDict([
+                ('mixture_weight', self.n_components),
+                ...
+            ])
+
+        """
+        pass
+
+    def split_param_types(self, x):
+        """Splits input tensor into the different param types. This method is
+        useful for applying activation and computing loss.
+
+        # Args
+            x : Tensor with shape[-1] == self.n_params
+
+        # Returns
+            list of Tensors, one for each param type
+        """
+        last_dim = x.shape[-1].value  # TODO only works with tf
+        if not last_dim == self.n_params:
             raise ValueError(
-                'this activation must be given tensor with last dimension'
-                'even dividable with number of parameter types: {}'.format(
-                    cls.n_param_types
+                'last dimension of x must be equal to the number of parameters'
+                ' of distribution, got {}, expected {}'.format(
+                    last_dim,
+                    self.n_params
                 )
             )
-        components = dim // cls.n_param_types
-        param_types = [
-            x[..., i*components:(i+1)*components]
-            for i in range(cls.n_param_types)
-        ]
+
+        idx = 0
+        param_types = []
+        for size in self.param_type_to_size.values():
+            param_types.append(x[..., idx:idx+size])
+            idx += size
 
         return param_types
 
     @property
     def n_params(self):
-        return self.n_param_types * self.n_components
+        return sum(self.param_type_to_size.values())
 
 
-class MixtureOfGaussian1D(MixtureDistributionBase):
-
-    param_type_names = ('mixture_weight', 'mu', 'sigma')
-    n_param_types = len(param_type_names)
-
+class MixtureOfGaussian1D(MixtureDistributionABC):
+    """1D Mixture of gaussian distribution"""
     def __init__(
         self,
         n_components,
@@ -105,6 +108,14 @@ class MixtureOfGaussian1D(MixtureDistributionBase):
         self.mu_activation = mu_activation or (lambda x: x)
         self.sigma_activation = sigma_activation or ScaledExponential()
 
+    @property
+    def param_type_to_size(self):
+        return OrderedDict([
+            ('mixture_weight', self.n_components),
+            ('mu', self.n_components),
+            ('sigma', self.n_components)
+        ])
+
     def activation(self, x):
         _mixture_weights, _mu, _sigma = self.split_param_types(x)
         mixture_weights = self.mixture_weight_activation(_mixture_weights)
@@ -113,11 +124,9 @@ class MixtureOfGaussian1D(MixtureDistributionBase):
 
         return concatenate([mixture_weights, mu, sigma], axis=-1)
 
-    @classmethod
-    def loss(cls, y_true, y_pred):
-        """TODO document and check dims of inputs
-        """
-        mixture_weights, mu, sigma, = cls.split_param_types(y_pred)
+    def loss(self, y_true, y_pred):
+        """Negative log pdf. Used logsum trick for numerical stability"""
+        mixture_weights, mu, sigma, = self.split_param_types(y_pred)
         norm = 1. / (np.sqrt(2. * np.pi) * sigma)
         exponent = -(
             K.square(y_true - mu) / (2. * K.square(sigma)) -
@@ -128,11 +137,20 @@ class MixtureOfGaussian1D(MixtureDistributionBase):
 
 
 class DistributionOutputLayer(Dense):
+    """Wraps Dense layer to output distribution parameters based on passed
+    distribution
 
+    # Arguments
+        distribution (DistributionABC): The distribution to output parameters
+        for
+    """
     def __init__(self, distribution, **kwargs):
         self.distribution = distribution
         if 'units' in kwargs or 'activation' in kwargs:
-            raise ValueError('')  # TODO
+            raise ValueError(
+                '"units" or "activation" should not be passed as kwargs '
+                'as this is already specified by the passed distribution'
+            )
         super(DistributionOutputLayer, self).__init__(
             units=distribution.n_params,
             activation=distribution.activation
