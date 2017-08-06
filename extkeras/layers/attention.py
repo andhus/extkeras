@@ -36,12 +36,12 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
         self.concatenate_input = concatenate_input
         self.attend_after = attend_after
 
-        self._attention_input_spec = None
-        self._attention_step_output_spec = None
-        self._attention_state_spec = []
-        self._attention_states = []
-        # self._attention_fwd_state = None
+        self._attended_spec = InputSpec(ndim=2)
+        self._attention_step_output_spec = InputSpec(ndim=2)
+        self._attention_state_spec = [InputSpec(ndim=2)]
+        self._attention_states = [None]
 
+        # will be set in call, then passed to step by get_constants
         self._attended = None
 
     def _validate_wrapped_recurrent(self, recurrent_layer):
@@ -69,8 +69,8 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
                 setattr(recurrent_layer, attr, expected_value)
 
     @property
-    def attention_input_spec(self):
-        return self._attention_input_spec
+    def attended_spec(self):
+        return self._attended_spec
 
     @property
     def attention_step_output_spec(self):
@@ -79,17 +79,6 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
     @property
     def attention_state_spec(self):
         return self._attention_state_spec
-
-    # @property
-    # def attention_state_and_fwd_spec(self):
-    #     """
-    #     Returns
-            # list (possibly empty) of InputSpec
-        # """
-        # if self.attend_after:
-        #     return self._attention_state_spec + [self.attention_step_output_spec]
-        # else:
-        #     return self._attention_state_spec
 
     @property
     def attention_states(self):
@@ -110,11 +99,20 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
         wrapped_step_input_shape,
         wrapped_state_shapes
     ):
-        """"""
+        """Build transformations related to attention mechanism, will be called
+        in build"""
         pass
 
-    @abc.abstractmethod
-    def compute_attention_step_output_shape(self, step_input_shape):
+    @abc.abstractproperty
+    def attention_output_dim(self):
+        """Must be specified independently  of input shape.
+
+        Normally we would compute output shape by passing input shape but
+        this would lead to infinite recursion (TODO explain).
+
+        # Returns
+            dimension of attention output (int)
+        """
         pass
 
     @abc.abstractmethod
@@ -127,18 +125,25 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
     ):
         """
 
-        :param attended: the same tensor each timestep
-        :param attention_states: states from previous attention step
-        :param step_input: the inputs at current timesteps
-        :param recurrent_states: from previous state if attend before or from
-            this timestep if attend after.
-        :return:
+        # Args
+            attended: the same tensor each timestep
+            attention_states: states from previous attention step, by
+                default attention from last step but can be extended
+            step_input: the inputs at current timesteps
+            recurrent_states: states for recurrent layer (excluding constants
+                like dropout tensors) from previous state if attend_after=False
+                otherwise from current time step.
+
+        # Returns
+            attention_h: the computed attention at current time step
+            attention_states: states to be passed to next attention_step,
+                normally just [attention_h]
         """
         pass
 
     @property
     def input_spec(self):
-        return [self.attention_input_spec, self.recurrent_layer.input_spec]
+        return [self.attended_spec, self.recurrent_layer.input_spec]
 
     @property
     def states(self):
@@ -153,89 +158,82 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
         return self.attention_state_spec + recurrent_state_spec
 
     def compute_output_shape(self, input_shape):
+        """"""
         if isinstance(input_shape, list):
-            input_shape = input_shape[0]
+            [input_shape] = input_shape
+
+        recurrent_output_shape = self._compute_recurrent_step_output_shape(
+            input_shape
+        )
 
         if self.return_sequences:
-            output_shape = (
-                input_shape[0],
-                input_shape[1],
-                self.recurrent_layer.units
-            )
+            if self.return_attention:
+                output_shape = [
+                    (input_shape[0], input_shape[1], self.attention_output_dim),
+                    input_shape[:2] + recurrent_output_shape[1:]
+                ]
+            else:
+                output_shape = input_shape[:2] + recurrent_output_shape[1:]
         else:
-            output_shape = (input_shape[0], self.recurrent_layer.units)
-
-        # TODO modify if return_attention !
+            if self.return_attention:
+                output_shape = [
+                    (input_shape[0], self.attention_output_dim),
+                    recurrent_output_shape
+                ]
+            else:
+                output_shape = recurrent_output_shape
 
         if self.return_state:
-            # TODO must be fixed wrt attention states
-            state_shape = [(input_shape[0], self.units) for _ in self.states]
-            return [output_shape] + state_shape
+            if not isinstance(output_shape, list):
+                output_shape = [output_shape]
+            attention_state_shape = [
+                (input_shape[0], spec.shape[-1])
+                for spec in self.attention_state_spec
+            ]
+            recurrent_state_shape = [
+                (input_shape[0], self.recurrent_layer.units)
+                for _ in self.recurrent_layer.states
+            ]
+            return output_shape + attention_state_shape + recurrent_state_shape
         else:
             return output_shape
 
-    # def compute_output_shape(self, input_shape):
-    #     """"""
-    #     if isinstance(input_shape, list):
-    #         [input_shape] = input_shape
-    #
-    #     recurrent_output_shape = self._compute_wrapped_recurrent_output_shape(
-    #         input_shape
-    #     )
-    #
-    #     if self.return_sequences:
-    #         output_shape = input_shape[:2] + recurrent_output_shape[1:]
-    #     else:
-    #         output_shape = recurrent_output_shape
-    #
-    #     if self.return_state:
-    #         pass
-    #         # TODO
-    #     #     state_shape = [(input_shape[0], self.units) for _ in self.states]
-    #     #     return [output_shape] + state_shape
-    #     # else:
-    #     #     return output_shape
-    #
-    # def _compute_wrapped_recurrent_output_shape(
-    #     self,
-    #     input_shape,
-    # ):
-    #     """Computes wrapped recurrent "step" output shape (no time/sequence
-    #     dimension).
-    #
-    #     Normally this output shape should be independent if attention is
-    #     applied before or after and normally it is simply:
-    #         (input_shape[0], wrapped_recurrent.units)
-    #     However the approach in this method is more safe for custom recurrent
-    #     layers where this might not be the case.
-    #
-    #     # Returns
-    #         The wrapped recurrent (step) output shape (int, int)
-    #     """
-    #     [attended_shape, input_shape] = input_shape
-    #     if self.attend_after:
-    #         wrapped_recurrent_input_shape = input_shape
-    #     else:  # attend before (default)
-    #         step_input_shape = (input_shape[0], input_shape[-1])
-    #         attention_step_output_shape = self.compute_attention_step_output_shape(
-    #             step_input_shape
-    #         )
-    #         wrapped_recurrent_input_shape = (
-    #             input_shape[0],
-    #             input_shape[1],
-    #             attention_step_output_shape[-1] + input_shape[-1]
-    #             if self.concatenate_input else attention_step_output_shape[-1]
-    #         )
-    #
-    #     return self.recurrent_layer.compute_output_shape(
-    #         wrapped_recurrent_input_shape
-    #     )
+    def _compute_recurrent_step_output_shape(
+        self,
+        input_shape,
+    ):
+        """Computes wrapped recurrent "step" output shape (no time/sequence
+        dimension).
+
+        Normally this output shape is simply:
+            (input_shape[0], wrapped_recurrent.units)
+        However the approach in this method is more safe for custom recurrent
+        layers where this might not be the case.
+
+        # Returns
+            The wrapped recurrent (step) output shape (int, int)
+        """
+        [attended_shape, input_shape] = input_shape
+        wrapped_recurrent_input_shape = (
+            input_shape[0],
+            input_shape[1],
+            self.attention_output_dim + input_shape[-1]
+            if self.concatenate_input else self.attention_output_dim
+        )
+
+        return self.recurrent_layer.compute_output_shape(
+            wrapped_recurrent_input_shape
+        )
+        # it is verified that this will return the step output shape
+        # since return sequences must be False in recurrent layer
 
     def build(self, input_shape):
+
         [attended_shape, input_shape] = input_shape
 
         wrapped_step_input_shape = input_shape[:1] + input_shape[-1:]
 
+        # TODO go through this part below!
         wrapped_state_shapes = [
             input_shape[:1] + spec.shape[1:]
             for spec in self.recurrent_layer.state_spec
@@ -248,15 +246,15 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
             wrapped_step_input_shape,
             wrapped_state_shapes
         )
-        wrapped_input_shape = (
-            input_shape[:-1] +
-            self.compute_attention_step_output_shape(
-                wrapped_step_input_shape
-            )[-1:]
+        wrapped_recurrent_input_shape = (
+            input_shape[0],
+            input_shape[1],
+            self.attention_output_dim + input_shape[-1]
+            if self.concatenate_input else self.attention_output_dim
         )
-        self.recurrent_layer.build(wrapped_input_shape)
+        self.recurrent_layer.build(wrapped_recurrent_input_shape)
 
-        self._attention_input_spec = InputSpec(shape=attended_shape)
+        self._attended_spec = InputSpec(shape=attended_shape)
         self.built = True
 
     def __call__(self, inputs, initial_state=None, **kwargs):
@@ -336,7 +334,7 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
         # TODO the above not yet supported!
 
         if self.concatenate_input:
-            recurrent_input = concatenate(attention_h_tm1, inputs)
+            recurrent_input = concatenate([attention_h_tm1, inputs])
         else:
             recurrent_input = attention_h_tm1
 
