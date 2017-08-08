@@ -36,6 +36,8 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
         self.concatenate_input = concatenate_input
         self.attend_after = attend_after
 
+        self.input_spec = [InputSpec(ndim=3), None]
+
         self._attended_spec = InputSpec(ndim=2)
         self._attention_step_output_spec = InputSpec(ndim=2)
         self._attention_state_spec = [InputSpec(ndim=2)]
@@ -137,13 +139,19 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
         # Returns
             attention_h: the computed attention at current time step
             attention_states: states to be passed to next attention_step,
-                normally just [attention_h]
+                normally this is just [attention_h], NOTE if more states are
+                used these should be _appeded_ to attention states,
+                attention_states[0] should always be attention_h.
         """
         pass
 
-    @property
-    def input_spec(self):
-        return [self.attended_spec, self.recurrent_layer.input_spec]
+    def get_attention_initial_state(self, inputs):
+        # build an all-zero tensor of shape (samples, output_dim)
+        initial_state = K.zeros_like(inputs)  # (samples, timesteps, input_dim)
+        initial_state = K.sum(initial_state, axis=(1, 2))  # (samples,)
+        initial_state = K.expand_dims(initial_state)  # (samples, 1)
+        initial_state = K.tile(initial_state, [1, self.attention_output_dim])  # (samples, output_dim)
+        return [initial_state]
 
     @property
     def states(self):
@@ -159,8 +167,7 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
 
     def compute_output_shape(self, input_shape):
         """"""
-        if isinstance(input_shape, list):
-            [input_shape] = input_shape
+        [input_shape, attention_shape] = input_shape
 
         recurrent_output_shape = self._compute_recurrent_step_output_shape(
             input_shape
@@ -200,7 +207,7 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
 
     def _compute_recurrent_step_output_shape(
         self,
-        input_shape,
+        recurrent_input_shape,
     ):
         """Computes wrapped recurrent "step" output shape (no time/sequence
         dimension).
@@ -213,11 +220,10 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
         # Returns
             The wrapped recurrent (step) output shape (int, int)
         """
-        [attended_shape, input_shape] = input_shape
         wrapped_recurrent_input_shape = (
-            input_shape[0],
-            input_shape[1],
-            self.attention_output_dim + input_shape[-1]
+            recurrent_input_shape[0],
+            recurrent_input_shape[1],
+            self.attention_output_dim + recurrent_input_shape[-1]
             if self.concatenate_input else self.attention_output_dim
         )
 
@@ -229,32 +235,39 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
 
     def build(self, input_shape):
 
-        [attended_shape, input_shape] = input_shape
+        [input_shape, attended_shape] = input_shape
 
-        wrapped_step_input_shape = input_shape[:1] + input_shape[-1:]
+        self.input_spec = [  # TODO remove?
+            InputSpec(shape=input_shape),
+            InputSpec(shape=attended_shape)
+        ]
 
-        # TODO go through this part below!
+        wrapped_step_input_shape = (input_shape[0], input_shape[-1])
+
+        # TODO for existing keras recurrent layers state size is always units
+        # but that is not very general...
         wrapped_state_shapes = [
             input_shape[:1] + spec.shape[1:]
             for spec in self.recurrent_layer.state_spec
         ] if isinstance(self.recurrent_layer.state_spec, list) else [(
             input_shape[:1] + self.recurrent_layer.state_spec.shape[1:]
         )]
-
         self.attention_build(
             attended_shape,
             wrapped_step_input_shape,
             wrapped_state_shapes
         )
+        self._attended_spec = InputSpec(shape=attended_shape)
+
         wrapped_recurrent_input_shape = (
             input_shape[0],
             input_shape[1],
             self.attention_output_dim + input_shape[-1]
             if self.concatenate_input else self.attention_output_dim
         )
+
         self.recurrent_layer.build(wrapped_recurrent_input_shape)
 
-        self._attended_spec = InputSpec(shape=attended_shape)
         self.built = True
 
     def __call__(self, inputs, initial_state=None, **kwargs):
@@ -295,50 +308,58 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
         return constants
 
     def step(self, inputs, states):
+        state_components = self.get_states_components(states)
         if self.attend_after:
-            return self.attend_before_step(inputs, states)
+            return self.attend_after_step(inputs, *state_components)
         else:
-            return self.attend_after_step(inputs, states)
+            return self.attend_before_step(inputs, *state_components)
 
-    def attend_before_step(self, inputs, states):
-        attended, attention_states, recurrent_states, recurrent_constants = \
-            self.get_states_components(states)
-
+    def attend_before_step(
+        self,
+        inputs,
+        attended,
+        attention_states_tm1,
+        recurrent_states_tm1,
+        recurrent_constants
+    ):
         attention_h, attention_states = \
             self.attention_step(
                 attended=attended,
-                attention_states=attention_states,
-                recurrent_input=inputs,
-                recurrent_states=recurrent_states,
+                attention_states=attention_states_tm1,
+                step_input=inputs,
+                recurrent_states=recurrent_states_tm1,
             )
         if self.concatenate_input:
             recurrent_input = concatenate([attention_h, inputs])
         else:
             recurrent_input = attention_h
 
-        output, recurrent_states_and_constants = self.recurrent_layer.step(
+        output, recurrent_states = self.recurrent_layer.step(
             recurrent_input,
-            recurrent_states + recurrent_constants
+            recurrent_states_tm1 + recurrent_constants
         )
 
         if self.return_attention:
-            output = concatenate(output, attention_h)
+            output = concatenate([output, attention_h])
 
-        return output, attention_states + recurrent_states_and_constants
+        return output, attention_states + recurrent_states
 
-    def attend_after_step(self, inputs, states):
-        attended, attention_states_tm1, recurrent_states_tm1, recurrent_constants = \
-            self.get_states_components(states)
-
-        attention_states_tm1, attention_h_tm1 = attention_states_tm1[:-1], attention_states_tm1[-1]
-        # TODO the above not yet supported!
+    def attend_after_step(
+        self,
+        inputs,
+        attended,
+        attention_states_tm1,
+        recurrent_states_tm1,
+        recurrent_constants
+    ):
+        attention_h_tm1 = attention_states_tm1[0]
 
         if self.concatenate_input:
             recurrent_input = concatenate([attention_h_tm1, inputs])
         else:
             recurrent_input = attention_h_tm1
 
-        output, recurrent_states_and_constants = self.recurrent_layer.step(
+        output, recurrent_states = self.recurrent_layer.step(
             recurrent_input,
             recurrent_states_tm1 + recurrent_constants
         )
@@ -348,19 +369,16 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
                 attended=attended,
                 attention_states=attention_states_tm1,
                 step_input=inputs,
-                recurrent_states=(
-                    recurrent_states_and_constants[:self.n_recurrent_states]
-                )
+                recurrent_states=recurrent_states
             )
 
-        attention_states.append(attention_h)
-
         if self.return_attention:
-            output = concatenate(output, attention_h)
+            output = concatenate([output, attention_h])
 
-        return output, attention_states + recurrent_states_and_constants
+        return output, attention_states + recurrent_states
 
     def get_states_components(self, states):
+        states = list(states)  # is tuple before?
         states_, attended = states[:-1], states[-1]
         attention_states = states_[:self.n_attention_states]
         states__ = states[self.n_attention_states:]
@@ -374,204 +392,166 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
             recurrent_constants
         )
 
-    # simply bypassed methods
     def get_initial_state(self, inputs):
-        return self.recurrent_layer.get_initial_state(inputs) + []  # TODO support attention states
+        return (
+            self.get_attention_initial_state(inputs) +
+            self.recurrent_layer.get_initial_state(inputs)
+        )
 
     def preprocess_input(self, inputs, training=None):
+        # TODO disable!
         return self.recurrent_layer.preprocess_input(inputs, training=training)
 
 
-class AttentionLayer(Recurrent):
+class DenseStatelessAttention(RecurrentAttentionWrapper):
 
-    def __init__(
-        self,
-        units,
-        *args,
-        **kwargs
-    ):
-        super(AttentionLayer, self).__init__(*args, **kwargs)
+    def __init__(self, units, **kwargs):
+        super(DenseStatelessAttention, self).__init__(**kwargs)
         self.units = units
 
-    @property
-    def states(self):
-        return []
-
-    def attention_step(
-        self,
-        attended,
-        recurrent_input,
-        recurrent_states,
-        attention_states
-    ):
-        """
-        :param inputs:
-        :param states:
-
-        :return: (recurrent input, attention_states), first will be passed as
-            inputs to RNN
-        """
-        raise NotImplementedError('')
-
-    def compute_output_shape(self, input_shape):
-        # default is concatenation of input and attention
-        return (input_shape[0], input_shape[1] + self.units)
-
-    def build(
+    def attention_build(
         self,
         attended_shape,
-        recurrent_step_input_shape,
-        recurrent_state_shapes
+        wrapped_step_input_shape,
+        wrapped_state_shapes
     ):
-        self.built = True
-
-    def __call__(self, *args, **kwargs):
-        raise NotImplementedError(
-            'RecurrentAttentionLayer should only be used within a '
-            'RecurrentAttentionWrapper'
-        )
-
-
-class DenseStatelessAttention(ChildrenLayersMixin, AttentionLayer):
-
-    def build(
-        self,
-        attended_shape,
-        recurrent_step_input_shape,
-        recurrent_state_shapes
-    ):
+        """Build transformations related to attention mechanism, will be called
+        in build"""
         self.dense = self.add_child('dense', Dense(self.units))
         self.dense.build(
             (
                 attended_shape[0],
                 (
                     attended_shape[1] +
-                    recurrent_step_input_shape[1] +
-                    sum([s[1] for s in recurrent_state_shapes])
+                    wrapped_step_input_shape[1] +
+                    sum([s[1] for s in wrapped_state_shapes])
                 )
             )
         )
-        self.built = True
-
-    def attention_step(
-        self,
-        attended,
-        recurrent_input,
-        recurrent_states,
-        attention_states
-    ):
-        assert not attention_states
-        attention = self.dense(
-            concatenate([attended, recurrent_input] + recurrent_states)
-        )
-        return concatenate([recurrent_input, attention]), []
-
-
-class AlexGravesSequenceAttentionParams(MixtureDistributionABC):
-    """NON-NORMALISED 1D Mixture of gaussian distribution"""
-
-    def __init__(
-        self,
-        n_components,
-        alpha_activation=None,
-        beta_activation=None,
-        kappa_activation=None,
-    ):
-        super(AlexGravesSequenceAttentionParams, self).__init__(n_components)
-        self.alpha_activation = alpha_activation or K.exp
-        self.beta_activation = beta_activation or K.exp
-        self.kappa_activation = kappa_activation or K.exp
 
     @property
-    def param_type_to_size(self):
-        return OrderedDict([
-            ('alpha', self.n_components),
-            ('beta', self.n_components),
-            ('kappa', self.n_components)
-        ])
-
-    def activation(self, x):
-        _alpha, _beta, _kappa = self.split_param_types(x)
-        alpha = self.alpha_activation(_alpha)
-        beta = self.beta_activation(_kappa)
-        kappa = self.kappa_activation(_beta)
-
-        return concatenate([alpha, beta, kappa], axis=-1)
-
-    def loss(self, y_true, y_pred):
-        raise NotImplementedError('')
-
-
-class AlexGravesSequenceAttention(ChildrenLayersMixin, AttentionLayer):
-
-    def __init__(
-        self,
-        n_components,
-        alpha_activation=None,
-        beta_activation=None,
-        kappa_activation=None,
-        *args,
-        **kwargs
-    ):
-        super(AlexGravesSequenceAttention, self).__init__(*args, **kwargs)
-        self.distribution = AlexGravesSequenceAttentionParams(
-            n_components,
-            alpha_activation,
-            beta_activation,
-            kappa_activation,
-        )
-
-    def build(
-        self,
-        attended_shape,
-        recurrent_step_input_shape,
-        recurrent_state_shapes
-    ):
-        self.attended_shape = attended_shape
-        self.params_layer = self.add_child(
-            'params_layer',
-            DistributionOutputLayer(
-                self.distribution
-            )
-        )
-        input_shape = (
-            attended_shape[0],
-            recurrent_step_input_shape[-1] + recurrent_state_shapes[0]
-        )
-        self.params_layer.build(input_shape)
+    def attention_output_dim(self):
+        return self.units
 
     def attention_step(
         self,
         attended,
-        recurrent_input,
+        attention_states,
+        step_input,
         recurrent_states,
-        attention_states
     ):
-        [kappa_tm1] = attention_states[0]
-        params = self.params_layer(
-            concatenate([recurrent_input, recurrent_states[0]])
+        attention_h = self.dense(
+            concatenate([attended, step_input] + recurrent_states)
         )
-        attention, kappa = self.get_attention(params, attended, kappa_tm1)
-        concatenate([recurrent_input, attention]), [kappa]
+        return attention_h, [attention_h]
 
-    def get_attention(self, params, attended, kappa_tm1):
-        """
-        # Args
-            params: the params of this distribution
-            attended: the attended sequence (samples, timesteps, features)
-        # Returns
-            attention tensor (samples, features)
-        """
-        att_idx = K.constant(np.arange(self.attended_shape[1])[None, :, None])
-        alpha, beta, kappa = self.distribution.split_param_types(params)
-        kappa = K.expand_dims(kappa + kappa_tm1, 1)
-        beta = K.expand_dims(beta, 1)
-        alpha = K.expand_dims(alpha, 1)
-        attention_w = K.sum(
-            alpha * K.exp(- beta * K.square(kappa - att_idx)),
-            axis=-1
-        )
-        attention_w = K.expand_dims(attention_w, -1)
-        attention = K.sum(attention_w * attended, axis=1)
 
-        return attention, kappa[:, 0, :]
+
+# class AlexGravesSequenceAttentionParams(MixtureDistributionABC):
+#     """NON-NORMALISED 1D Mixture of gaussian distribution"""
+#
+#     def __init__(
+#         self,
+#         n_components,
+#         alpha_activation=None,
+#         beta_activation=None,
+#         kappa_activation=None,
+#     ):
+#         super(AlexGravesSequenceAttentionParams, self).__init__(n_components)
+#         self.alpha_activation = alpha_activation or K.exp
+#         self.beta_activation = beta_activation or K.exp
+#         self.kappa_activation = kappa_activation or K.exp
+#
+#     @property
+#     def param_type_to_size(self):
+#         return OrderedDict([
+#             ('alpha', self.n_components),
+#             ('beta', self.n_components),
+#             ('kappa', self.n_components)
+#         ])
+#
+#     def activation(self, x):
+#         _alpha, _beta, _kappa = self.split_param_types(x)
+#         alpha = self.alpha_activation(_alpha)
+#         beta = self.beta_activation(_kappa)
+#         kappa = self.kappa_activation(_beta)
+#
+#         return concatenate([alpha, beta, kappa], axis=-1)
+#
+#     def loss(self, y_true, y_pred):
+#         raise NotImplementedError('')
+#
+#
+# class AlexGravesSequenceAttention(ChildrenLayersMixin, AttentionLayer):
+#
+#     def __init__(
+#         self,
+#         n_components,
+#         alpha_activation=None,
+#         beta_activation=None,
+#         kappa_activation=None,
+#         *args,
+#         **kwargs
+#     ):
+#         super(AlexGravesSequenceAttention, self).__init__(*args, **kwargs)
+#         self.distribution = AlexGravesSequenceAttentionParams(
+#             n_components,
+#             alpha_activation,
+#             beta_activation,
+#             kappa_activation,
+#         )
+#
+#     def build(
+#         self,
+#         attended_shape,
+#         recurrent_step_input_shape,
+#         recurrent_state_shapes
+#     ):
+#         self.attended_shape = attended_shape
+#         self.params_layer = self.add_child(
+#             'params_layer',
+#             DistributionOutputLayer(
+#                 self.distribution
+#             )
+#         )
+#         input_shape = (
+#             attended_shape[0],
+#             recurrent_step_input_shape[-1] + recurrent_state_shapes[0]
+#         )
+#         self.params_layer.build(input_shape)
+#
+#     def attention_step(
+#         self,
+#         attended,
+#         recurrent_input,
+#         recurrent_states,
+#         attention_states
+#     ):
+#         [kappa_tm1] = attention_states[0]
+#         params = self.params_layer(
+#             concatenate([recurrent_input, recurrent_states[0]])
+#         )
+#         attention, kappa = self.get_attention(params, attended, kappa_tm1)
+#         concatenate([recurrent_input, attention]), [kappa]
+#
+#     def get_attention(self, params, attended, kappa_tm1):
+#         """
+#         # Args
+#             params: the params of this distribution
+#             attended: the attended sequence (samples, timesteps, features)
+#         # Returns
+#             attention tensor (samples, features)
+#         """
+#         att_idx = K.constant(np.arange(self.attended_shape[1])[None, :, None])
+#         alpha, beta, kappa = self.distribution.split_param_types(params)
+#         kappa = K.expand_dims(kappa + kappa_tm1, 1)
+#         beta = K.expand_dims(beta, 1)
+#         alpha = K.expand_dims(alpha, 1)
+#         attention_w = K.sum(
+#             alpha * K.exp(- beta * K.square(kappa - att_idx)),
+#             axis=-1
+#         )
+#         attention_w = K.expand_dims(attention_w, -1)
+#         attention = K.sum(attention_w * attended, axis=1)
+#
+#         return attention, kappa[:, 0, :]
