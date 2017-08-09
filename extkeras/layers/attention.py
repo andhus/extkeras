@@ -13,8 +13,10 @@ from keras.layers import Dense, concatenate, Layer
 from keras.layers.recurrent import Recurrent
 
 from extkeras.layers.children_layers_mixin import ChildrenLayersMixin
-from extkeras.layers.distribution import MixtureDistributionABC, \
+from extkeras.layers.distribution import (
+    MixtureDistributionABC,
     DistributionOutputLayer
+)
 
 
 class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
@@ -23,7 +25,7 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
         self,
         recurrent_layer,
         return_attention=False,
-        concatenate_input=True,  # TODO auto concat input to
+        concatenate_input=True,
         attend_after=False,
         **kwargs
     ):
@@ -399,7 +401,7 @@ class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
         )
 
     def preprocess_input(self, inputs, training=None):
-        # TODO disable!
+        # TODO disable!?
         return self.recurrent_layer.preprocess_input(inputs, training=training)
 
 
@@ -446,112 +448,136 @@ class DenseStatelessAttention(RecurrentAttentionWrapper):
         return attention_h, [attention_h]
 
 
+class AlexGravesSequenceAttentionParams(MixtureDistributionABC):
+    """NON-NORMALISED 1D Mixture of gaussian distribution"""
 
-# class AlexGravesSequenceAttentionParams(MixtureDistributionABC):
-#     """NON-NORMALISED 1D Mixture of gaussian distribution"""
-#
-#     def __init__(
-#         self,
-#         n_components,
-#         alpha_activation=None,
-#         beta_activation=None,
-#         kappa_activation=None,
-#     ):
-#         super(AlexGravesSequenceAttentionParams, self).__init__(n_components)
-#         self.alpha_activation = alpha_activation or K.exp
-#         self.beta_activation = beta_activation or K.exp
-#         self.kappa_activation = kappa_activation or K.exp
-#
-#     @property
-#     def param_type_to_size(self):
-#         return OrderedDict([
-#             ('alpha', self.n_components),
-#             ('beta', self.n_components),
-#             ('kappa', self.n_components)
-#         ])
-#
-#     def activation(self, x):
-#         _alpha, _beta, _kappa = self.split_param_types(x)
-#         alpha = self.alpha_activation(_alpha)
-#         beta = self.beta_activation(_kappa)
-#         kappa = self.kappa_activation(_beta)
-#
-#         return concatenate([alpha, beta, kappa], axis=-1)
-#
-#     def loss(self, y_true, y_pred):
-#         raise NotImplementedError('')
-#
-#
-# class AlexGravesSequenceAttention(ChildrenLayersMixin, AttentionLayer):
-#
-#     def __init__(
-#         self,
-#         n_components,
-#         alpha_activation=None,
-#         beta_activation=None,
-#         kappa_activation=None,
-#         *args,
-#         **kwargs
-#     ):
-#         super(AlexGravesSequenceAttention, self).__init__(*args, **kwargs)
-#         self.distribution = AlexGravesSequenceAttentionParams(
-#             n_components,
-#             alpha_activation,
-#             beta_activation,
-#             kappa_activation,
-#         )
-#
-#     def build(
-#         self,
-#         attended_shape,
-#         recurrent_step_input_shape,
-#         recurrent_state_shapes
-#     ):
-#         self.attended_shape = attended_shape
-#         self.params_layer = self.add_child(
-#             'params_layer',
-#             DistributionOutputLayer(
-#                 self.distribution
-#             )
-#         )
-#         input_shape = (
-#             attended_shape[0],
-#             recurrent_step_input_shape[-1] + recurrent_state_shapes[0]
-#         )
-#         self.params_layer.build(input_shape)
-#
-#     def attention_step(
-#         self,
-#         attended,
-#         recurrent_input,
-#         recurrent_states,
-#         attention_states
-#     ):
-#         [kappa_tm1] = attention_states[0]
-#         params = self.params_layer(
-#             concatenate([recurrent_input, recurrent_states[0]])
-#         )
-#         attention, kappa = self.get_attention(params, attended, kappa_tm1)
-#         concatenate([recurrent_input, attention]), [kappa]
-#
-#     def get_attention(self, params, attended, kappa_tm1):
-#         """
-#         # Args
-#             params: the params of this distribution
-#             attended: the attended sequence (samples, timesteps, features)
-#         # Returns
-#             attention tensor (samples, features)
-#         """
-#         att_idx = K.constant(np.arange(self.attended_shape[1])[None, :, None])
-#         alpha, beta, kappa = self.distribution.split_param_types(params)
-#         kappa = K.expand_dims(kappa + kappa_tm1, 1)
-#         beta = K.expand_dims(beta, 1)
-#         alpha = K.expand_dims(alpha, 1)
-#         attention_w = K.sum(
-#             alpha * K.exp(- beta * K.square(kappa - att_idx)),
-#             axis=-1
-#         )
-#         attention_w = K.expand_dims(attention_w, -1)
-#         attention = K.sum(attention_w * attended, axis=1)
-#
-#         return attention, kappa[:, 0, :]
+    def __init__(
+        self,
+        n_components,
+        alpha_activation=None,
+        beta_activation=None,
+        kappa_activation=None,
+    ):
+        super(AlexGravesSequenceAttentionParams, self).__init__(n_components)
+        self.alpha_activation = alpha_activation or K.exp
+        self.beta_activation = beta_activation or K.exp
+        self.kappa_activation = kappa_activation or K.exp
+
+    @property
+    def param_type_to_size(self):
+        return OrderedDict([
+            ('alpha', self.n_components),
+            ('beta', self.n_components),
+            ('kappa', self.n_components)
+        ])
+
+    def activation(self, x):
+        _alpha, _beta, _kappa = self.split_param_types(x)
+        alpha = self.alpha_activation(_alpha)
+        beta = self.beta_activation(_kappa)
+        kappa = self.kappa_activation(_beta)
+
+        return concatenate([alpha, beta, kappa], axis=-1)
+
+    def loss(self, y_true, y_pred):
+        raise NotImplementedError('')
+
+
+class AlexGravesSequenceAttention(RecurrentAttentionWrapper):
+
+    def __init__(
+        self,
+        n_components,
+        alpha_activation=None,
+        beta_activation=None,
+        kappa_activation=None,
+        *args,
+        **kwargs
+    ):
+        super(AlexGravesSequenceAttention, self).__init__(*args, **kwargs)
+        self.distribution = AlexGravesSequenceAttentionParams(
+            n_components,
+            alpha_activation,
+            beta_activation,
+            kappa_activation,
+        )
+        self._attention_states = [None, None]
+        self._attention_state_spec = [
+            InputSpec(ndim=2),          # attention (tm1)
+            InputSpec(shape=(None, 1))  # kappa
+        ]
+
+    def attention_build(
+        self,
+        attended_shape,
+        wrapped_step_input_shape,
+        wrapped_state_shapes
+    ):
+        self.attended_shape = attended_shape
+        self.params_layer = self.add_child(
+            'params_layer',
+            DistributionOutputLayer(
+                self.distribution
+            )
+        )
+        input_shape = (
+            attended_shape[0],
+            wrapped_step_input_shape[-1] + wrapped_state_shapes[0]
+        )
+        self.params_layer.build(input_shape)
+
+    def get_attention_initial_state(self, inputs):
+        [attention_tm1_state] = super(
+            AlexGravesSequenceAttention,
+            self
+        ).get_attention_initial_state(inputs)
+        kappa_tm1 = K.zeros_like(inputs)  # (samples, timesteps, input_dim)
+        kappa_tm1 = K.sum(kappa_tm1, axis=(1, 2))  # (samples,)
+        kappa_tm1 = K.expand_dims(kappa_tm1)  # (samples, 1)
+        kappa_tm1 = K.tile(kappa_tm1, [1, self.distribution.n_components])  # (samples, n_components)
+
+        return [attention_tm1_state, kappa_tm1]
+
+    def attention_step(
+        self,
+        attended,
+        attention_states,
+        step_input,
+        recurrent_states
+    ):
+        [attention_tm1, kappa_tm1] = attention_states
+        params = self.params_layer(
+            concatenate([step_input, recurrent_states[0]])
+        )
+        attention, kappa = self._get_attention_and_kappa(
+            attended,
+            params,
+            kappa_tm1
+        )
+        return attention, [attention, kappa]
+
+    def _get_attention_and_kappa(self, attended, params, kappa_tm1):
+        """
+        # Args
+            params: the params of this distribution
+            attended: the attended sequence (samples, timesteps, features)
+        # Returns
+            attention tensor (samples, features)
+        """
+        att_idx = K.constant(np.arange(self.attended_shape[1])[None, :, None])
+        alpha, beta, kappa_diff = self.distribution.split_param_types(params)
+        kappa = kappa_diff + kappa_tm1
+
+        kappa_ = K.expand_dims(kappa, 1)
+        beta_ = K.expand_dims(beta, 1)
+        alpha_ = K.expand_dims(alpha, 1)
+
+        attention_w = K.sum(
+            alpha_ * K.exp(- beta_ * K.square(kappa_ - att_idx)),
+            axis=-1,
+            # keepdims=True
+        )
+        attention_w = K.expand_dims(attention_w, -1)  # TODO remove and keepdims
+        attention = K.sum(attention_w * attended, axis=1)
+
+        return attention, kappa[:, 0, :]
