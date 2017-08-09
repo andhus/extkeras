@@ -522,9 +522,13 @@ class AlexGravesSequenceAttention(RecurrentAttentionWrapper):
         )
         input_shape = (
             attended_shape[0],
-            wrapped_step_input_shape[-1] + wrapped_state_shapes[0]
+            wrapped_step_input_shape[-1] + wrapped_state_shapes[0][-1]
         )
         self.params_layer.build(input_shape)
+
+    @property
+    def attention_output_dim(self):
+        return self._attended_spec.shape[-1]  # "height" of sequence
 
     def get_attention_initial_state(self, inputs):
         [attention_tm1_state] = super(
@@ -580,4 +584,4 @@ class AlexGravesSequenceAttention(RecurrentAttentionWrapper):
         attention_w = K.expand_dims(attention_w, -1)  # TODO remove and keepdims
         attention = K.sum(attention_w * attended, axis=1)
 
-        return attention, kappa[:, 0, :]
+        return attention, kappa
