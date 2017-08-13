@@ -5,10 +5,10 @@ from keras import backend as K
 from keras.layers.recurrent import Recurrent
 from keras.layers.recurrent import SimpleRNN as _SimpleRNN
 
-from extkeras.layers.children_layers_mixin import ChildrenLayersMixin
+from extkeras.layers.children_layers_mixin import ChildLayersMixin
 
 
-class RecurrentAttentionWrapper(ChildrenLayersMixin, Recurrent):
+class RecurrentAttentionWrapper(ChildLayersMixin, Recurrent):
 
     def __init__(self, attention_model, recurrent_layer):
         super(RecurrentAttentionWrapper, self).__init__()

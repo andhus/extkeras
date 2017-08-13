@@ -3,7 +3,7 @@ from __future__ import division, print_function
 from collections import OrderedDict
 
 
-class ChildrenLayersMixin(object):
+class ChildLayersMixin(object):
     """Mixin for using internal layers in arbitrary ways internally in a Layer.
 
     All internal layers should be:
