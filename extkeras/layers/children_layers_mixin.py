@@ -1,5 +1,6 @@
 from __future__ import division, print_function
 
+from warnings import warn
 from collections import OrderedDict
 
 
@@ -21,12 +22,30 @@ class ChildLayersMixin(object):
         else:
             return self._children
 
+    @children.setter
+    def children(self, value):
+        raise NotImplementedError(
+            'property children should not be set, use method add_child'
+        )
+
     def add_child(self, identifier, layer):
         if not hasattr(self, '_children'):
             self._children = OrderedDict([])
         self._children[identifier] = layer
 
         return layer
+
+    @property
+    def trainable(self):
+        return getattr(self, '_trainable', True)
+
+    @trainable.setter
+    def trainable(self, value):
+        if not value == self.trainable:
+            warn('changing trainable property of {} does not modify children')
+        self._trainable = value
+        # FIXME how to deal with this, some children might intentionally
+        # not be trainable?
 
     @property
     def trainable_weights(self):

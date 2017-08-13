@@ -6,12 +6,11 @@ import numpy as np
 
 from keras import Input
 from keras.engine import Model
-from keras.layers import Dense, SimpleRNN, TimeDistributed, LSTM
+from keras.layers import Dense, TimeDistributed, LSTM
 
-from extkeras.layers.attention import AlexGravesSequenceAttention
+from extkeras.layers.attention import GravesSequenceAttention
 
 # canonical example of attention for alignment
-
 # in this example the model should learn to "parse" through and attended
 # sequence and output only relevant parts
 
@@ -47,8 +46,8 @@ n_labels = 4
 input_labels = Input((n_timesteps_labels, n_labels))
 attended = Input((n_timesteps_attended, n_labels))
 
-recurrent_layer = LSTM(units=32, implementation=1)
-attention_rnn = AlexGravesSequenceAttention(
+recurrent_layer = LSTM(units=64, implementation=1)
+attention_rnn = GravesSequenceAttention(
     n_components=3,
     recurrent_layer=recurrent_layer,
     return_sequences=True
@@ -71,12 +70,10 @@ labels_data, attended_data = get_training_data(
 input_labels_data = labels_data[:, :-1, :]
 target_labels_data = labels_data[:, 1:, :]
 
-output_data = model.predict([input_labels_data, attended_data])
-
 model.compile(optimizer='Adam', loss='categorical_crossentropy')
 model.fit(
     x=[input_labels_data, attended_data],
     y=target_labels_data,
     nb_epoch=5
 )
-output_data_ = model.predict([input_labels_data, attended_data])
+output_data = model.predict([input_labels_data, attended_data])

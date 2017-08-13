@@ -9,7 +9,7 @@ import numpy as np
 
 from keras import backend as K
 from keras.engine import InputSpec
-from keras.layers import Dense, concatenate, Layer
+from keras.layers import Dense, concatenate
 from keras.layers.recurrent import Recurrent
 
 from extkeras.layers.children_layers_mixin import ChildLayersMixin
@@ -28,14 +28,33 @@ class RecurrentAttention(ChildLayersMixin, Recurrent):
     All recurrent attention layers (`X`, `Y`, `Z`) also follow the
     specifications of this class and accept the keyword arguments listed below.
 
-    TODO add example, general description and references.
+    # TODO add general description, example, and references.
+
+    Attention implementations extending this class should implement the
+    following methods:
+        attention_build
+        attention_step
+    as well as the property:
+        attention_output_dim
+    If the attention implementation requires state(s) to be passed between
+    attention computations at each timestep (apart from previous attention
+    representation `attention_h` which is passed by default) the following
+    method an properties should also be modified accordingly:
+        get_attention_initial_state
+        attention_states
+        attention_state_specs
+    See docs of respective method/property for further details.
 
     # Arguments
         recurrent_layer: layers.recurrent.Recurrent. The recurrent layer to
             wrap with attention implemented by this class (see attention_step).
-            It is required that recurrent_layer.implementation == 1, i.e. there
-            should be no modification of inputs in
-            recurrent_layer.preprocess_input().
+            The following keyword arguments [return_sequences, return_state,
+            go_backwards, stateful] should be set to their default value
+            False, will otherwise be overwritten. The corresponding
+            keyword argument should be passed to this class instead. Moreover
+            it is required that recurrent_layer.implementation == 1, i.e.
+            preprocessed_inputs should be identical to inputs after calling:
+            preprocessed_inputs = recurrent_layer.preprocess_input(inputs).
         return_attention: Boolean (default False). Whether to return attention
             representation `attention_h` besides wrapped recurrent layers
             output or just the output.
@@ -43,7 +62,7 @@ class RecurrentAttention(ChildLayersMixin, Recurrent):
             concatenation of the attention representation and input at each
             timestep to the wrapped recurrent_layer.step() or just the
             attention representation `attention_h`.
-        attend_after: Boolean (default False). Weather to compute attention
+        attend_after: Boolean (default False). Whether to compute attention
             representation `attention_h` after recurrent_layer.step operation
             (based on states_t and used as input for recurrent_layer.step at
             t+1) or before (based on states_{t-1} and used as input for
@@ -85,60 +104,12 @@ class RecurrentAttention(ChildLayersMixin, Recurrent):
         # will be set in call, then passed to step by get_constants
         self._attended = None
 
-    def _validate_wrapped_recurrent(self, recurrent_layer):
-        wrapped_recurrent_expected_attrs = dict(
-            return_sequences=False,
-            return_state=False,
-            go_backwards=False,
-            stateful=False
-        )
-        for attr, expected_value in wrapped_recurrent_expected_attrs.items():
-            if not getattr(recurrent_layer, attr) == expected_value:
-                warn(
-                    'non default value for {recurrent_class}.{attr}, '
-                    'found {existing}, expected {expected}. This attribute '
-                    'will be overwritten with expected value. The '
-                    'corresponding argument should instead be passed to the '
-                    '{self_class}'.format(
-                        recurrent_class=recurrent_layer.__class__.__name__,
-                        attr=attr,
-                        existing=getattr(recurrent_layer, attr),
-                        expected=expected_value,
-                        self_class=self.__class__.__name__
-                    )
-                )
-                setattr(recurrent_layer, attr, expected_value)
-
-    @property
-    def attended_spec(self):
-        return self._attended_spec
-
-    @property
-    def attention_step_output_spec(self):
-        return self._attention_step_output_spec
-
-    @property
-    def attention_state_spec(self):
-        return self._attention_state_spec
-
-    @property
-    def attention_states(self):
-        return self._attention_states
-
-    @property
-    def n_attention_states(self):
-        return len(self.attention_states)
-
-    @property
-    def n_recurrent_states(self):
-        return len(self.recurrent_layer.states)
-
     @abc.abstractmethod
     def attention_build(
         self,
         attended_shape,
         step_input_shape,
-        wrapped_recurrent_state_shapes
+        recurrent_state_shapes
     ):
         """Build transformations related to attention mechanism, will be called
         in build method.
@@ -146,7 +117,7 @@ class RecurrentAttention(ChildLayersMixin, Recurrent):
         # Arguments
             attended_shape: Tuple. Shape of attended.
             step_input_shape: Tuple. Shape of input at _one_ timestep
-            wrapped_recurrent_state_shapes: [Tuple]. shape of wrapped recurrent
+            recurrent_state_shapes: [Tuple]. shape of wrapped recurrent
                 states
         """
         pass
@@ -200,12 +171,76 @@ class RecurrentAttention(ChildLayersMixin, Recurrent):
         pass
 
     def get_attention_initial_state(self, inputs):
+        """Creates initial state for attention mechanism. By default the
+        attention representation `attention_h` computed by attention_step is
+        passed as attention state between timesteps.
+
+        Extending attention implementations that requires additional states
+        must modify over implement this method accordingly.
+
+        # Arguments
+            inputs: layer inputs
+
+        # Returns
+            list (length one) of initial state (zeros)
+        """
         # build an all-zero tensor of shape (samples, output_dim)
         initial_state = K.zeros_like(inputs)  # (samples, timesteps, input_dim)
         initial_state = K.sum(initial_state, axis=(1, 2))  # (samples,)
         initial_state = K.expand_dims(initial_state)  # (samples, 1)
         initial_state = K.tile(initial_state, [1, self.attention_output_dim])  # (samples, output_dim)
         return [initial_state]
+
+    def _validate_wrapped_recurrent(self, recurrent_layer):
+        """Only default keyword arguments should be used for wrapped recurrent
+        layer for keywords listed below.
+        """
+        wrapped_recurrent_expected_attrs = dict(
+            return_sequences=False,
+            return_state=False,
+            go_backwards=False,
+            stateful=False
+        )
+        for attr, expected_value in wrapped_recurrent_expected_attrs.items():
+            if not getattr(recurrent_layer, attr) == expected_value:
+                warn(
+                    'non default value for {recurrent_class}.{attr}, '
+                    'found {existing}, expected {expected}. This attribute '
+                    'will be overwritten with expected value. The '
+                    'corresponding argument should instead be passed to the '
+                    '{self_class}'.format(
+                        recurrent_class=recurrent_layer.__class__.__name__,
+                        attr=attr,
+                        existing=getattr(recurrent_layer, attr),
+                        expected=expected_value,
+                        self_class=self.__class__.__name__
+                    )
+                )
+                setattr(recurrent_layer, attr, expected_value)
+
+    @property
+    def attended_spec(self):
+        return self._attended_spec
+
+    @property
+    def attention_step_output_spec(self):
+        return self._attention_step_output_spec
+
+    @property
+    def attention_state_spec(self):
+        return self._attention_state_spec
+
+    @property
+    def attention_states(self):
+        return self._attention_states
+
+    @property
+    def n_attention_states(self):
+        return len(self.attention_states)
+
+    @property
+    def n_recurrent_states(self):
+        return len(self.recurrent_layer.states)
 
     @property
     def states(self):
@@ -328,7 +363,7 @@ class RecurrentAttention(ChildLayersMixin, Recurrent):
         """
         # Arguments
             inputs: list of [recurrent_input, attended]
-            TODO
+            TODO separate keyword for attended?
         """
         outputs = super(RecurrentAttention, self).__call__(
             inputs,
@@ -472,7 +507,7 @@ class DenseStatelessAttention(RecurrentAttention):
         self,
         attended_shape,
         step_input_shape,
-        wrapped_recurrent_state_shapes
+        recurrent_state_shapes
     ):
         """Build transformations related to attention mechanism, will be called
         in build"""
@@ -483,7 +518,7 @@ class DenseStatelessAttention(RecurrentAttention):
                 (
                     attended_shape[1] +
                     step_input_shape[1] +
-                    sum([s[1] for s in wrapped_recurrent_state_shapes])
+                    sum([s[1] for s in recurrent_state_shapes])
                 )
             )
         )
@@ -540,8 +575,9 @@ class AlexGravesSequenceAttentionParams(MixtureDistributionABC):
         raise NotImplementedError('')
 
 
-class AlexGravesSequenceAttention(RecurrentAttention):
-
+class GravesSequenceAttention(RecurrentAttention):
+    """
+    """
     def __init__(
         self,
         n_components,
@@ -551,7 +587,7 @@ class AlexGravesSequenceAttention(RecurrentAttention):
         *args,
         **kwargs
     ):
-        super(AlexGravesSequenceAttention, self).__init__(*args, **kwargs)
+        super(GravesSequenceAttention, self).__init__(*args, **kwargs)
         self.distribution = AlexGravesSequenceAttentionParams(
             n_components,
             alpha_activation,
@@ -568,7 +604,7 @@ class AlexGravesSequenceAttention(RecurrentAttention):
         self,
         attended_shape,
         step_input_shape,
-        wrapped_recurrent_state_shapes
+        recurrent_state_shapes
     ):
         self.attended_shape = attended_shape
         self.params_layer = self.add_child(
@@ -579,7 +615,7 @@ class AlexGravesSequenceAttention(RecurrentAttention):
         )
         input_shape = (
             attended_shape[0],
-            step_input_shape[-1] + wrapped_recurrent_state_shapes[0][-1]
+            step_input_shape[-1] + recurrent_state_shapes[0][-1]
         )
         self.params_layer.build(input_shape)
 
@@ -589,7 +625,7 @@ class AlexGravesSequenceAttention(RecurrentAttention):
 
     def get_attention_initial_state(self, inputs):
         [attention_tm1_state] = super(
-            AlexGravesSequenceAttention,
+            GravesSequenceAttention,
             self
         ).get_attention_initial_state(inputs)
         kappa_tm1 = K.zeros_like(inputs)  # (samples, timesteps, input_dim)
