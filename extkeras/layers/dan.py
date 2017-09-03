@@ -168,31 +168,37 @@ class DANRecurrent(ChildLayersMixin, Recurrent):
         self.built = True
 
     def preprocess_input(self, inputs, training=None):
-        if self.implementation > 0:
-            return inputs
-        else:
-            raise ValueError('')
+        return inputs
 
     def step(self, inputs, states):
         if not self.implementation == 0:
             raise ValueError('')
 
-        [in_key, value_tm1] = states
+        [in_key, value_tm1] = states[:2]
 
         out_key, value = self._step(in_key, value_tm1)
 
-        return value, [out_key]
+        return value, [out_key, value]
 
     def _step(self, in_key, value_tm1):
         edge_weights = K.sum(
-            (in_key - K.softmax(self.in_keys)**2),
+            (
+                K.expand_dims(in_key, 1) -
+                K.expand_dims(K.softmax(self.in_keys), 0)
+            ) ** 2,
             axis=-1,
             keepdims=True
         )
-        edge_weights = tf.nn.softmax(edge_weights, dim=0)  # TODO no dim in keras softmax!?
-        out_key = edge_weights * K.softmax(self.out_keys)
-        new_value = edge_weights * self.values
-        value = value_tm1 * 0.1 + new_value * 0.1
+        edge_weights = tf.nn.softmax(edge_weights, dim=1)  # TODO no dim in keras softmax!?
+        out_key = K.sum(
+            edge_weights * K.softmax(self.out_keys),
+            axis=1,
+        )
+        new_value = K.sum(
+            edge_weights * K.softmax(self.values),
+            axis=1,
+        )
+        value = value_tm1 * 0.9 + new_value * 0.1
 
         return out_key, value
 
