@@ -8,7 +8,7 @@ from keras import Input
 from keras.engine import Model
 from keras.layers import Dense, TimeDistributed, LSTM
 
-from extkeras.layers.attention import GravesSequenceAttention
+from extkeras.layers.attention_deprecated import GravesSequenceAttention
 
 # canonical example of attention for alignment
 # in this example the model should learn to "parse" through and attended
