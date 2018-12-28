@@ -1,5 +1,7 @@
 from __future__ import print_function
 
+from collections import namedtuple
+
 import numpy as np
 
 
@@ -50,11 +52,14 @@ class SequenceLengthBatching(object):
         batch_size,
         cap_length=None,
         shuffle_p=0.5,
-        postprocess=None
+        postprocess_f=None
     ):
         self.sequences = sequences
         self.batch_size = batch_size
-        self.postprocess = postprocess
+        if postprocess_f is not None:
+            self.postprocess_f = postprocess_f
+        else:
+            self.postprocess_f = lambda x: x
         self.cap_length = cap_length
         self.shuffle_p = shuffle_p
 
@@ -74,6 +79,11 @@ class SequenceLengthBatching(object):
         self.max_num_elements_per_batch = int(
             self.batch_size * self.average_length_caped
         )
+        self.balanced_idx_batches = get_balanced_idx_batches(
+            sequence_lengths=self.lengths_caped,
+            max_elements=self.max_num_elements_per_batch
+        )
+        self.num_batches = len(self.balanced_idx_batches)
 
     def get_generator(self):
         idx_batches = get_balanced_idx_batches(
@@ -81,9 +91,20 @@ class SequenceLengthBatching(object):
             max_elements=self.max_num_elements_per_batch
         )
         local_batch_shuffle(idx_batches, p=self.shuffle_p)
-        # TODO repartition to get balanced again?
         for idx_batch in idx_batches:
             sequence_batch = [
                 self.sequences[idx][:self.max_length] for idx in idx_batch
             ]
-            yield sequence_batch
+            yield self.postprocess_f(sequence_batch)
+
+
+class SequenceTuple(object):
+
+    def __init__(self, elements):
+        self.elements = elements
+
+    def __len__(self):
+        return sum([len(e) for e in self.elements])
+
+
+def postprocess()
